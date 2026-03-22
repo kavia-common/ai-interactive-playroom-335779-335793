@@ -10,11 +10,17 @@ function hintColor(hint: number) {
   return "text-red-700";
 }
 
-export default function GameBoard() {
+type GameBoardProps = {
+  onReveal?: (x: number, y: number) => void;
+};
+
+export default function GameBoard({ onReveal }: GameBoardProps) {
   const grid = useGameStore((s) => s.grid);
   const difficulty = useGameStore((s) => s.difficulty);
   const status = useGameStore((s) => s.status);
   const reveal = useGameStore((s) => s.reveal);
+
+  const doReveal = onReveal ?? reveal;
 
   const { w, h } = useMemo(() => difficultyToSize(difficulty), [difficulty]);
 
@@ -51,7 +57,7 @@ export default function GameBoard() {
                 key={cell?.id ?? idx}
                 type="button"
                 whileTap={{ scale: 0.97 }}
-                onClick={() => reveal(cell.x, cell.y)}
+                onClick={() => doReveal(cell.x, cell.y)}
                 disabled={status !== "playing" || revealed}
                 className={[
                   "relative aspect-square rounded-xl border text-center",

@@ -96,8 +96,8 @@ export default function Sidebar() {
       </div>
 
       <div className="mt-auto text-xs leading-relaxed text-brand-muted">
-        This is a fully client-side game UI with optional backend health + websocket
-        wiring via <code>VITE_API_BASE</code> and <code>VITE_WS_URL</code>.
+        This is a fully client-side game UI with optional backend health + event streaming
+        (SSE) wiring via <code>VITE_BACKEND_URL</code>/<code>VITE_API_BASE</code>.
       </div>
     </div>
   );

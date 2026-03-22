@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { getEnv } from "../config/env";
 import { apiGet } from "../api/httpClient";
-import { WsClient } from "../api/wsClient";
+import { emitGameEvent, interactAI } from "../api/backend";
 import { useGameStore } from "../state/useGameStore";
 import GameBoard from "./GameBoard";
 import Sidebar from "./Sidebar";
@@ -14,7 +14,9 @@ function useBackendWiring() {
   const setWsStatus = useGameStore((s) => s.setWsStatus);
   const pushToast = useGameStore((s) => s.pushToast);
 
-  const wsRef = useRef<WsClient | null>(null);
+  const reveal = useGameStore((s) => s.reveal);
+
+  const sseRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -29,32 +31,98 @@ function useBackendWiring() {
       }
     })();
 
-    wsRef.current = new WsClient({
-      onStatus: (st) => setWsStatus(st),
-      onMessage: (msg) => {
-        // We don't assume a backend protocol yet; show a lightweight toast.
-        // This keeps WS wiring live without coupling to backend implementation.
-        const str = typeof msg === "string" ? msg : JSON.stringify(msg);
-        pushToast({
-          type: "info",
-          title: "WS message",
-          message: str.slice(0, 160),
-        });
-      },
-    });
+    // SSE stream: backend exposes GET /api/events/stream
+    const { apiBase, ssePath } = getEnv();
+    try {
+      setWsStatus("connecting");
+      const es = new EventSource(`${apiBase}${ssePath}`);
+      sseRef.current = es;
 
-    wsRef.current.connect();
+      es.onopen = () => {
+        setWsStatus("connected");
+      };
+
+      // Backend emits SSE event name "game_event"
+      es.addEventListener("game_event", (evt) => {
+        const data = (evt as MessageEvent).data;
+        try {
+          const parsed = JSON.parse(String(data));
+          const type = parsed?.type ? String(parsed.type) : "EVENT";
+          pushToast({
+            type: "info",
+            title: `Event: ${type}`,
+            message: String(parsed?.payload ? JSON.stringify(parsed.payload) : data).slice(0, 160),
+          });
+        } catch {
+          pushToast({ type: "info", title: "Event", message: String(data).slice(0, 160) });
+        }
+      });
+
+      es.onerror = () => {
+        setWsStatus("error");
+      };
+    } catch {
+      setWsStatus("error");
+    }
 
     return () => {
       cancelled = true;
-      wsRef.current?.disconnect();
-      wsRef.current = null;
+      sseRef.current?.close();
+      sseRef.current = null;
+      setWsStatus("disconnected");
     };
   }, [pushToast, setApiHealth, setWsStatus]);
 
   return {
-    sendWs: (data: unknown) => wsRef.current?.send(data),
-    reconnectWs: () => wsRef.current?.reconnect(),
+    reconnectStream: () => {
+      // Simple reconnect: close and let effect re-run by forcing status change + recreating ES.
+      sseRef.current?.close();
+      sseRef.current = null;
+      setWsStatus("disconnected");
+      // Best-effort "poke" by setting connecting; user can click multiple times.
+      setWsStatus("connecting");
+      const { apiBase, ssePath } = getEnv();
+      const es = new EventSource(`${apiBase}${ssePath}`);
+      sseRef.current = es;
+      es.onopen = () => setWsStatus("connected");
+      es.addEventListener("game_event", (evt) => {
+        const data = (evt as MessageEvent).data;
+        pushToast({ type: "info", title: "Event", message: String(data).slice(0, 160) });
+      });
+      es.onerror = () => setWsStatus("error");
+    },
+
+    /**
+     * Wrap reveal so we can emit an event + fetch an AI reply after a move.
+     * This keeps integration minimal and does not change the existing game logic.
+     */
+    revealWithBackend: async (x: number, y: number) => {
+      reveal(x, y);
+
+      // Emit move event (non-blocking)
+      void emitGameEvent({
+        type: "PLAYER_REVEAL",
+        payload: { x, y },
+      }).catch(() => {
+        // Ignore; backend may be down.
+      });
+
+      // Ask AI for a tiny narration (non-blocking)
+      void interactAI({
+        prompt: `Player revealed tile at (${x}, ${y}).`,
+        mode: "narrate",
+      })
+        .then((resp) => {
+          pushToast({
+            type: "info",
+            title: "AI",
+            message: resp.result.reply.slice(0, 160),
+          });
+        })
+        .catch(() => {
+          // Ignore; backend may be down.
+        });
+    },
   };
 }
 
@@ -65,7 +133,7 @@ export default function App() {
   const apiHealth = useGameStore((s) => s.apiHealth);
   const wsStatus = useGameStore((s) => s.wsStatus);
 
-  const { reconnectWs } = useBackendWiring();
+  const { reconnectStream, revealWithBackend } = useBackendWiring();
 
   useEffect(() => {
     // Start a game immediately.
@@ -101,7 +169,7 @@ export default function App() {
               {apiHealth}
             </span>
 
-            <span className="hidden md:inline">WS:</span>
+            <span className="hidden md:inline">SSE:</span>
             <button
               type="button"
               className={
@@ -112,8 +180,8 @@ export default function App() {
                     ? "bg-red-50 text-red-700"
                     : "bg-slate-50 text-slate-700")
               }
-              title={wsUrl}
-              onClick={() => reconnectWs()}
+              title={`(legacy) ${wsUrl}`}
+              onClick={() => reconnectStream()}
             >
               {wsStatus}
             </button>
@@ -128,7 +196,7 @@ export default function App() {
           transition={{ duration: 0.35, ease: "easeOut" }}
           className="rounded-2xl border bg-white p-3 shadow-sm"
         >
-          <GameBoard />
+          <GameBoard onReveal={revealWithBackend} />
         </motion.section>
 
         <motion.aside
